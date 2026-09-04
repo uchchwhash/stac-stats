@@ -9,30 +9,15 @@ import sys
 import boto3
 import botocore
 from dask import array as da
-import numpy
 from pystac_client import Client
 from pystac import ItemCollection
+import numpy
 
 from odc.algo import xr_geomedian
 from odc.geo import BoundingBox
 from odc.geo.xr import write_cog, assign_crs
-from odc.io.cgroups import get_cpu_quota
 from odc.stac import configure_rio, stac_load
 
-
-class TaskMetaData(typing.NamedTuple):
-    """
-    Data storage for query parameters.
-
-    Dates have the form 'YYYY-MM-DD'
-    """
-
-    start_date: str
-    end_date: str
-
-
-query_crs = "EPSG:4326"
-output_crs = "EPSG:32757"
 
 s2_bands = [
     "red",
@@ -60,6 +45,9 @@ s2_bands = [
     "thumbnail",
 ]
 
+query_crs = "EPSG:4326"
+output_crs = "EPSG:32757"
+
 measurements = ["blue", "green", "red", "nir"]
 masking_band = "scl"
 resolution = 10
@@ -73,7 +61,15 @@ chunks = {"x": 1000, "y": 1000}
 threads_per_chunk = 4
 
 
-meta = TaskMetaData(start_date="2026-01-01", end_date="2026-08-31")
+class TaskMetaData(typing.NamedTuple):
+    """
+    Data storage for query parameters.
+
+    Dates have the form 'YYYY-MM-DD'
+    """
+
+    start_date: str
+    end_date: str
 
 
 def log(*args, **kwargs):
@@ -276,6 +272,9 @@ def execute_task(region_code, meta: TaskMetaData):
 
 
 def main():
+    # TODO: gather date strings & job specific params here as needed
+    meta = TaskMetaData(start_date="2026-01-01", end_date="2026-08-31")
+
     tasks_list = read_tasks_list()
 
     while tasks_list != []:

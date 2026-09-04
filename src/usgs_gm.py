@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
 import multiprocessing
@@ -9,9 +8,10 @@ import sys
 
 import boto3
 import botocore
-import numpy
+from dask import array as da
 from pystac_client import Client
 from pystac import ItemCollection
+import numpy
 
 from odc.algo import xr_geomedian
 from odc.geo import BoundingBox
@@ -24,10 +24,14 @@ output_crs = "EPSG:32757"
 
 measurements = ["coastal", "blue", "green", "red", "nir08", "swir16", "swir22"]
 masking_band = "qa_pixel"
+resolution = 30
 
-product = "2025-07-present"
+product = "2026-Jan-Aug-MAD"
 s3_bucket = "dea-dme-dev"
-s3_prefix = "products/solomons/geomad"
+s3_prefix = "products/solomons/imam/geomad"
+
+chunks = {"x": 1000, "y": 1000}
+threads_per_chunk = 4
 
 
 class TaskMetaData(typing.NamedTuple):
@@ -126,36 +130,36 @@ def search(bbox, meta: TaskMetaData):
 
 
 def load_mask(items, bbox):
-    with ThreadPoolExecutor() as pool:
-        mask_ds = stac_load(
-            items=items,
-            bands=[masking_band],
-            crs=output_crs,
-            resolution=30,
-            bbox=bbox,
-            resampling="nearest",
-            dtype="int32",
-            pool=pool,
-            patch_url=rewrite_asset_urls,
-        )
+    mask_ds = stac_load(
+        items=items,
+        bands=[masking_band],
+        crs=output_crs,
+        resolution=resolution,
+        bbox=bbox,
+        resampling="nearest",
+        dtype="int16",
+        chunks=chunks,
+        fail_on_error=False,
+        patch_url=rewrite_asset_urls,
+    )
 
     masking_data = mask_ds[masking_band]
     return ((masking_data & 1) == 0) & ((masking_data & (1 << 6)) == (1 << 6))
 
 
 def load_optical(items, bbox):
-    with ThreadPoolExecutor() as pool:
-        optical_ds = stac_load(
-            items=items,
-            bands=measurements,
-            crs=output_crs,
-            resolution=30,
-            bbox=bbox,
-            resampling="average",
-            dtype="float32",
-            pool=pool,
-            patch_url=rewrite_asset_urls,
-        )
+    optical_ds = stac_load(
+        items=items,
+        bands=measurements,
+        crs=output_crs,
+        resolution=resolution,
+        bbox=bbox,
+        resampling="average",
+        dtype="float32",
+        chunks=chunks,
+        fail_on_error=False,
+        patch_url=rewrite_asset_urls,
+    )
 
     nodata = 0
     scale = 0.00002750
@@ -165,15 +169,10 @@ def load_optical(items, bbox):
     for band in measurements:
         optical_ds[band] = (
             optical_ds[band].dims,
-            numpy.where(
-                optical_ds[band].data != nodata, optical_ds[band].data, numpy.nan
-            ),
+            da.where(optical_ds[band].data != nodata, optical_ds[band].data, numpy.nan),
         )
         optical_ds[band] = (optical_ds[band] * scale + offset) * rescale
-        optical_ds[band] = (
-            optical_ds[band].dims,
-            numpy.clip(optical_ds[band], 0, rescale).data,
-        )
+        optical_ds[band] = optical_ds[band].clip(0, rescale)
     return optical_ds
 
 
@@ -187,7 +186,7 @@ def load(items, bbox):
     for band in measurements:
         optical_ds[band] = (
             optical_ds[band].dims,
-            numpy.where(mask, optical_ds[band], numpy.nan),
+            da.where(mask, optical_ds[band], numpy.nan),
         )
 
     return optical_ds
@@ -203,41 +202,41 @@ def write_input_data(ds):
             )
 
 
-def write_geomedian(gm, region_code, upload=False):
-    if upload:
-        s3_client = boto3.client("s3")
-    else:
-        s3_client = None
-
+def write_geomedian(gm, region_code, upload=True):
     root = Path("/output")
     folder = f"usgs_ls_gm/{region_code}"
     (root / folder).mkdir(parents=True, exist_ok=True)
 
     for band in measurements:
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
-        on_disk = str(root / filename)
         write_cog(
             gm[band],
-            on_disk,
+            str(root / filename),
             overwrite=True,
             compress="zstd",
             zstd_level=16,
             predictor=3,
         )
-        if upload:
-            s3_client.upload_file(on_disk, s3_bucket, f"{s3_prefix}/{filename}")
 
     filename = f"{folder}/gm_{product}_{region_code}.completed"
-    on_disk = str(root / filename)
-    with open(on_disk, "w") as fl:
+    with open(root / filename, "w") as fl:
         print("done!", file=fl)
-    if upload:
-        s3_client.upload_file(on_disk, s3_bucket, f"{s3_prefix}/{filename}")
+
+    if not upload:
+        return
+
+    s3_client = boto3.client("s3")
+    for band in measurements:
+        filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
+        s3_client.upload_file(
+            str(root / filename), s3_bucket, f"{s3_prefix}/{filename}"
+        )
+
+    filename = f"{folder}/gm_{product}_{region_code}.completed"
+    s3_client.upload_file(str(root / filename), s3_bucket, f"{s3_prefix}/{filename}")
 
 
 def check_exists(region_code):
-    return False
-
     s3_client = boto3.client("s3")
     folder = f"usgs_ls_gm/{region_code}"
     filename = f"{folder}/gm_{product}_{region_code}.completed"
@@ -249,6 +248,8 @@ def check_exists(region_code):
 
 
 def execute_task(region_code, meta: TaskMetaData):
+    ncpus = multiprocessing.cpu_count()
+    num_workers = int(ncpus / threads_per_chunk)
     configure_rio(cloud_defaults=True, aws={"requester_pays": True})
 
     bbox = bounds(extract_feature(region_code))
@@ -259,18 +260,18 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
     log("geomedian", datetime.now())
-    gm = assign_crs(
-        xr_geomedian(ds, num_threads=multiprocessing.cpu_count()), crs=output_crs
-    )
+    gm = xr_geomedian(ds, num_threads=threads_per_chunk)
+    log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
+    computed = gm.load(scheduler="threads", num_workers=num_workers)
     log("writing", datetime.now())
-    write_geomedian(gm, region_code)
+    write_geomedian(assign_crs(computed, crs=output_crs), region_code)
 
     log("done", datetime.now())
 
 
 def main():
     # TODO: gather date strings & job specific params here as needed
-    meta = TaskMetaData(start_date="2025-07-01", end_date="2026-12-31")
+    meta = TaskMetaData(start_date="2026-01-01", end_date="2026-08-31")
 
     tasks_list = read_tasks_list()
 
