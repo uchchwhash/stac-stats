@@ -13,7 +13,7 @@ from pystac_client import Client
 from pystac import ItemCollection
 import numpy
 
-from odc.algo import xr_geomedian
+from odc.algo import xr_geomedian, geomedian_with_mads
 from odc.geo import BoundingBox
 from odc.geo.xr import write_cog, assign_crs
 from odc.stac import configure_rio, stac_load
@@ -49,6 +49,7 @@ query_crs = "EPSG:4326"
 output_crs = "EPSG:32757"
 
 measurements = ["blue", "green", "red", "nir"]
+mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "scl"
 resolution = 10
 
@@ -204,12 +205,12 @@ def write_input_data(ds):
             )
 
 
-def write_geomedian(gm, region_code, upload=True):
+def write_geomedian(gm, region_code, upload=False):
     root = Path("/output")
     folder = f"esa_s2_gm/{region_code}"
     (root / folder).mkdir(parents=True, exist_ok=True)
 
-    for band in measurements:
+    for band in (measurements + mad_bands):
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         write_cog(
             gm[band],
@@ -217,7 +218,7 @@ def write_geomedian(gm, region_code, upload=True):
             overwrite=True,
             compress="zstd",
             zstd_level=16,
-            predictor=3,
+            predictor=3 if band != "count" else 2,
         )
 
     filename = f"{folder}/gm_{product}_{region_code}.completed"
@@ -262,7 +263,7 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
     log("geomedian", datetime.now())
-    gm = xr_geomedian(ds, num_threads=threads_per_chunk)
+    gm = geomedian_with_mads(ds, reshape_strategy="yxbt", num_threads=threads_per_chunk)
     log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
     computed = gm.load(scheduler="threads", num_workers=num_workers)
     log("writing", datetime.now())
