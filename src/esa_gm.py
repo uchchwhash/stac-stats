@@ -139,7 +139,6 @@ def load_mask(items, bbox):
         resampling="nearest",
         dtype="int16",
         chunks=chunks,
-        fail_on_error=False,
     )
 
     masking_data = mask_ds[masking_band]
@@ -161,7 +160,6 @@ def load_optical(items, bbox):
         resampling="average",
         dtype="float32",
         chunks=chunks,
-        fail_on_error=False,
     )
 
     nodata = 0
@@ -229,7 +227,7 @@ def write_geomedian(gm, region_code, upload=False):
         return
 
     s3_client = boto3.client("s3")
-    for band in measurements:
+    for band in (measurements + mad_bands):
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         s3_client.upload_file(
             str(root / filename), s3_bucket, f"{s3_prefix}/{filename}"
@@ -263,7 +261,12 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
     log("geomedian", datetime.now())
-    gm = geomedian_with_mads(ds, reshape_strategy="yxbt", num_threads=threads_per_chunk)
+    gm = geomedian_with_mads(
+        ds,
+        reshape_strategy="yxbt",
+        work_chunks=(chunks["y"], chunks["x"]),
+        num_threads=threads_per_chunk,
+    )
     log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
     computed = gm.load(scheduler="threads", num_workers=num_workers)
     log("writing", datetime.now())

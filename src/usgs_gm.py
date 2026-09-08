@@ -13,7 +13,7 @@ from pystac_client import Client
 from pystac import ItemCollection
 import numpy
 
-from odc.algo import xr_geomedian
+from odc.algo import xr_geomedian, geomedian_with_mads
 from odc.geo import BoundingBox
 from odc.geo.xr import write_cog, assign_crs
 from odc.stac import configure_rio, stac_load
@@ -23,6 +23,7 @@ query_crs = "EPSG:4326"
 output_crs = "EPSG:32757"
 
 measurements = ["coastal", "blue", "green", "red", "nir08", "swir16", "swir22"]
+mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "qa_pixel"
 resolution = 30
 
@@ -139,7 +140,6 @@ def load_mask(items, bbox):
         resampling="nearest",
         dtype="int16",
         chunks=chunks,
-        fail_on_error=False,
         patch_url=rewrite_asset_urls,
     )
 
@@ -157,7 +157,6 @@ def load_optical(items, bbox):
         resampling="average",
         dtype="float32",
         chunks=chunks,
-        fail_on_error=False,
         patch_url=rewrite_asset_urls,
     )
 
@@ -207,7 +206,7 @@ def write_geomedian(gm, region_code, upload=True):
     folder = f"usgs_ls_gm/{region_code}"
     (root / folder).mkdir(parents=True, exist_ok=True)
 
-    for band in measurements:
+    for band in (measurements + mad_bands):
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         write_cog(
             gm[band],
@@ -215,7 +214,7 @@ def write_geomedian(gm, region_code, upload=True):
             overwrite=True,
             compress="zstd",
             zstd_level=16,
-            predictor=3,
+            predictor=3 if band != "count" else 2,
         )
 
     filename = f"{folder}/gm_{product}_{region_code}.completed"
@@ -226,7 +225,7 @@ def write_geomedian(gm, region_code, upload=True):
         return
 
     s3_client = boto3.client("s3")
-    for band in measurements:
+    for band in (measurements + mad_bands):
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         s3_client.upload_file(
             str(root / filename), s3_bucket, f"{s3_prefix}/{filename}"
@@ -260,7 +259,12 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
     log("geomedian", datetime.now())
-    gm = xr_geomedian(ds, num_threads=threads_per_chunk)
+    gm = geomedian_with_mads(
+        ds,
+        reshape_strategy="yxbt",
+        work_chunks=(chunks["y"], chunks["x"]),
+        num_threads=threads_per_chunk,
+    )
     log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
     computed = gm.load(scheduler="threads", num_workers=num_workers)
     log("writing", datetime.now())
