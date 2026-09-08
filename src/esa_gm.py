@@ -48,15 +48,16 @@ s2_bands = [
 query_crs = "EPSG:4326"
 output_crs = "EPSG:32757"
 
-measurements = ["blue", "green", "red", "nir"]
+measurements_10m = ["blue", "green", "red", "nir"]
+measurements_20m = ["swir22", "rededge2", "rededge3", "rededge1", "swir16", "nir08"]
 mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "scl"
-resolution = 10
+resolution = 20
+measurements = measurements_20m
 
-
-product = "2026-Jan-Aug-10m"
+product = f"2026-Jan-Aug-s2-{resolution}m-MAD"
 s3_bucket = "dea-dme-dev"
-s3_prefix = "products/solomons/imam/geomad"
+s3_prefix = f"products/solomons/imam/geomad/{product}"
 
 chunks = {"x": 1000, "y": 1000}
 threads_per_chunk = 4

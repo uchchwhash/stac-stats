@@ -27,9 +27,9 @@ mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "qa_pixel"
 resolution = 30
 
-product = "2026-Jan-Aug-MAD"
+product = "2026-Jan-Aug-ls-MAD"
 s3_bucket = "dea-dme-dev"
-s3_prefix = "products/solomons/imam/geomad"
+s3_prefix = f"products/solomons/imam/geomad/{product}"
 
 chunks = {"x": 1000, "y": 1000}
 threads_per_chunk = 4
