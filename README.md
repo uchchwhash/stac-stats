@@ -15,3 +15,4 @@
 * NOTE S2 10m 4 bands: 1 month, m7a.16xlarge, 64 CPUs, 256G RAM. 50 minutes. $USD 4.63, (500,500) chunks, about 70% mem
 * NOTE S2 10m 4 bands: 6 month, r6a.48xlarge, 64 CPUs, 1.5T RAM. (1000,1000) chunks, thread_per_worker=4, 150 mins, $USD 40
 * NOTE IMPORTANT run assume first before attempting
+* NOTE LS: 8 months, r6a.32xlarge succeeds with MADs
