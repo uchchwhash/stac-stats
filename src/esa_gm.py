@@ -5,6 +5,7 @@ from pathlib import Path
 import random
 import typing
 import sys
+from random import randint
 
 import boto3
 import botocore
@@ -27,14 +28,15 @@ measurements_10m = ["blue", "green", "red", "nir"]
 measurements_20m = ["swir22", "rededge2", "rededge3", "rededge1", "swir16", "nir08"]
 mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "scl"
-resolution = 10
-measurements = measurements_10m
+resolution = 20
+measurements = measurements_20m
 
 product = f"2026-Jan-Aug-s2-{resolution}m-MAD"
 s3_bucket = "dea-dme-dev"
 s3_prefix = f"products/solomons/imam/geomad/{product}"
+workspace = f"products/solomons/imam/geomad/tmp-workspace"
 
-chunks = {"x": 500, "y": 500}
+chunks = {"x": 1000, "y": 1000}
 threads_per_chunk = 8
 
 
@@ -239,6 +241,16 @@ def setup_dask_with_rio(num_workers, threads_per_worker):
     return dask_client
 
 
+def write_zarr(ds):
+    prefix = "obs"
+    filename = f"{prefix}-{randint(0, 0xFFFFFFFF):08x}.zarr"
+    store = f"{workspace}/{filename}"
+    log("writing to zarr", datetime.now())
+    ds.to_zarr(store, mode="w", consolidated=True, storage_options={"anon": False})
+    log("done writing to zarr", datetime.now())
+    return store
+
+
 def execute_task(region_code, meta: TaskMetaData):
     ncpus = multiprocessing.cpu_count()
     num_workers = int(ncpus / threads_per_chunk)
@@ -251,6 +263,13 @@ def execute_task(region_code, meta: TaskMetaData):
     ds = load(items, bbox)
     # log('writing input', datetime.now())
     # write_input_data(ds)
+
+    ds = xarray.open_zarr(
+        write_zarr(ds),
+        chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
+        consolidated=True,
+    )
+
     log("geomedian", datetime.now())
     gm = geomedian_with_mads(
         ds,
