@@ -9,41 +9,16 @@ import sys
 import boto3
 import botocore
 from dask import array as da
+import dask.distributed
 from pystac_client import Client
 from pystac import ItemCollection
 import numpy
+import xarray
 
 from odc.algo import xr_geomedian, geomedian_with_mads
 from odc.geo import BoundingBox
 from odc.geo.xr import write_cog, assign_crs
 from odc.stac import configure_rio, stac_load
-
-
-s2_bands = [
-    "red",
-    "green",
-    "blue",
-    "visual",
-    "nir",
-    "swir22",
-    "rededge2",
-    "rededge3",
-    "rededge1",
-    "swir16",
-    "wvp",
-    "nir08",
-    "scl",
-    "aot",
-    "coastal",
-    "nir09",
-    "cloud",
-    "snow",
-    "preview",
-    "granule_metadata",
-    "tileinfo_metadata",
-    "product_metadata",
-    "thumbnail",
-]
 
 query_crs = "EPSG:4326"
 output_crs = "EPSG:32757"
@@ -52,15 +27,15 @@ measurements_10m = ["blue", "green", "red", "nir"]
 measurements_20m = ["swir22", "rededge2", "rededge3", "rededge1", "swir16", "nir08"]
 mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "scl"
-resolution = 20
-measurements = measurements_20m
+resolution = 10
+measurements = measurements_10m
 
 product = f"2026-Jan-Aug-s2-{resolution}m-MAD"
 s3_bucket = "dea-dme-dev"
 s3_prefix = f"products/solomons/imam/geomad/{product}"
 
-chunks = {"x": 1000, "y": 1000}
-threads_per_chunk = 4
+chunks = {"x": 500, "y": 500}
+threads_per_chunk = 8
 
 
 class TaskMetaData(typing.NamedTuple):
@@ -142,13 +117,7 @@ def load_mask(items, bbox):
         chunks=chunks,
     )
 
-    masking_data = mask_ds[masking_band]
-
-    # 0: no data, 1: saturated, 2: cast shadow
-    # 3: cloud shadow, 4: vegetation, 5: not-vegetated
-    # 6: water, 7: unclassified, 8: cloud (medium)
-    # 9: cloud (high), 10: cirrus, 11: snow
-    return ~masking_data.isin([0, 1, 2, 3, 8, 9, 10])
+    return mask_ds[masking_band]
 
 
 def load_optical(items, bbox):
@@ -163,32 +132,41 @@ def load_optical(items, bbox):
         chunks=chunks,
     )
 
+    return optical_ds
+
+
+def mask_invalid(optical, mask):
+    # 0: no data, 1: saturated, 2: cast shadow
+    # 3: cloud shadow, 4: vegetation, 5: not-vegetated
+    # 6: water, 7: unclassified, 8: cloud (medium)
+    # 9: cloud (high), 10: cirrus, 11: snow
+    mask = ~mask.isin([0, 1, 2, 3, 8, 9, 10])
+
     nodata = 0
     scale = 0.0001
     offset = -0.1
     rescale = 10000.0
 
-    for band in measurements:
-        optical_ds[band] = (
-            optical_ds[band].dims,
-            da.where(optical_ds[band].data != nodata, optical_ds[band].data, numpy.nan),
-        )
-        optical_ds[band] = (optical_ds[band] * scale + offset) * rescale
-        optical_ds[band] = optical_ds[band].clip(0, rescale)
-    return optical_ds
+    optical = optical.where(optical != nodata)
+    optical = (optical * scale + offset) * rescale
+    optical = optical.clip(0, rescale)
+    optical = optical.where(mask)
+    return optical
 
 
 def load(items, bbox):
     log("loading mask", datetime.now())
-    mask = load_mask(items, bbox)
+    mask_da = load_mask(items, bbox).persist()
     log("loading bands", datetime.now())
     optical_ds = load_optical(items, bbox)
 
     log("masking", datetime.now())
     for band in measurements:
-        optical_ds[band] = (
-            optical_ds[band].dims,
-            da.where(mask, optical_ds[band], numpy.nan),
+        optical_ds[band] = xarray.map_blocks(
+            mask_invalid,
+            optical_ds[band],
+            (mask_da,),
+            template=optical_ds[band],
         )
 
     return optical_ds
@@ -204,12 +182,12 @@ def write_input_data(ds):
             )
 
 
-def write_geomedian(gm, region_code, upload=False):
+def write_geomedian(gm, region_code, upload=True):
     root = Path("/output")
     folder = f"esa_s2_gm/{region_code}"
     (root / folder).mkdir(parents=True, exist_ok=True)
 
-    for band in (measurements + mad_bands):
+    for band in measurements + mad_bands:
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         write_cog(
             gm[band],
@@ -228,7 +206,7 @@ def write_geomedian(gm, region_code, upload=False):
         return
 
     s3_client = boto3.client("s3")
-    for band in (measurements + mad_bands):
+    for band in measurements + mad_bands:
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         s3_client.upload_file(
             str(root / filename), s3_bucket, f"{s3_prefix}/{filename}"
@@ -249,10 +227,22 @@ def check_exists(region_code):
         return False
 
 
+def setup_dask_with_rio(num_workers, threads_per_worker):
+    cluster = dask.distributed.LocalCluster(
+        processes=False,
+        n_workers=num_workers,
+        threads_per_worker=threads_per_worker,
+        local_directory="/dask-workspace",
+    )
+    dask_client = dask.distributed.Client(cluster)
+    configure_rio(cloud_defaults=True, client=dask_client)
+    return dask_client
+
+
 def execute_task(region_code, meta: TaskMetaData):
     ncpus = multiprocessing.cpu_count()
     num_workers = int(ncpus / threads_per_chunk)
-    configure_rio(cloud_defaults=True)
+    dask_client = setup_dask_with_rio(num_workers, threads_per_chunk)
 
     bbox = bounds(extract_feature(region_code))
     log("searching", bbox.bbox, region_code, datetime.now())
@@ -269,11 +259,12 @@ def execute_task(region_code, meta: TaskMetaData):
         num_threads=threads_per_chunk,
     )
     log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
-    computed = gm.load(scheduler="threads", num_workers=num_workers)
+    computed = gm.load()
     log("writing", datetime.now())
     write_geomedian(assign_crs(computed, crs=output_crs), region_code)
 
     log("done", datetime.now())
+    dask_client.shutdown()
 
 
 def main():

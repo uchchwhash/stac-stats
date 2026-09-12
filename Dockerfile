@@ -20,6 +20,7 @@ RUN micromamba run -p /env pip install --no-cache-dir \
 
 FROM ubuntu:jammy-20240212
 COPY --from=stats-conda /env /env
+COPY distributed.yaml  /etc/dask/
 
 ENV GDAL_DRIVER_PATH=/env/lib/gdalplugins \ 
     PROJ_DATA=/env/share/proj \

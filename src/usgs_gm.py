@@ -176,8 +176,10 @@ def load_optical(items, bbox):
 
 
 def load(items, bbox):
-    log("loading mask", datetime.now())
-    mask = load_mask(items, bbox)
+    ncpus = multiprocessing.cpu_count()
+    num_workers = int(ncpus / threads_per_chunk)
+    log("loading mask with", num_workers, "workers", datetime.now())
+    mask = load_mask(items, bbox).persist(scheduler="threads", num_workers=num_workers)
     log("loading bands", datetime.now())
     optical_ds = load_optical(items, bbox)
 
@@ -206,7 +208,7 @@ def write_geomedian(gm, region_code, upload=True):
     folder = f"usgs_ls_gm/{region_code}"
     (root / folder).mkdir(parents=True, exist_ok=True)
 
-    for band in (measurements + mad_bands):
+    for band in measurements + mad_bands:
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         write_cog(
             gm[band],
@@ -225,7 +227,7 @@ def write_geomedian(gm, region_code, upload=True):
         return
 
     s3_client = boto3.client("s3")
-    for band in (measurements + mad_bands):
+    for band in measurements + mad_bands:
         filename = f"{folder}/gm_{product}_{region_code}_{band}.tif"
         s3_client.upload_file(
             str(root / filename), s3_bucket, f"{s3_prefix}/{filename}"

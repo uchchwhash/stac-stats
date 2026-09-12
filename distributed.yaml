@@ -1,0 +1,23 @@
+# Note that this file is used by Dask configuration
+distributed:
+  worker:
+    memory:
+      target: 0.8
+      spill: 0.85
+      pause: 0.95
+      terminate: 0.97
+  comm:
+    retry:
+      delay:
+        min: 5s
+        max: 60s
+    timeouts:
+      connect: 300s
+      tcp: 180s
+  scheduler:
+    work-stealing: False
+    allowed-failures: 5
+  admin:
+    large-graph-warning-threshold: 100MB
+  client:
+    heartbeat: 30s
