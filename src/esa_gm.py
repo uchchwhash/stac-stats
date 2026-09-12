@@ -232,6 +232,7 @@ def check_exists(region_code):
 def setup_dask_with_rio(num_workers, threads_per_worker):
     cluster = dask.distributed.LocalCluster(
         processes=False,
+        memory_limit=None,
         n_workers=num_workers,
         threads_per_worker=threads_per_worker,
         local_directory="/dask-workspace",
@@ -264,11 +265,11 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
 
-    ds = xarray.open_zarr(
-        write_zarr(ds),
-        chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
-        consolidated=True,
-    )
+    # ds = xarray.open_zarr(
+    #     write_zarr(ds),
+    #     chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
+    #     consolidated=True,
+    # )
 
     log("geomedian", datetime.now())
     gm = geomedian_with_mads(
