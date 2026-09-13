@@ -34,10 +34,10 @@ measurements = measurements_20m
 product = f"2026-Jan-Aug-s2-{resolution}m-MAD"
 s3_bucket = "dea-dme-dev"
 s3_prefix = f"products/solomons/imam/geomad/{product}"
-workspace = f"products/solomons/imam/geomad/tmp-workspace"
+workspace = f"/dask-workspace"
 
 chunks = {"x": 1000, "y": 1000}
-threads_per_chunk = 8
+threads_per_worker = 4
 
 
 class TaskMetaData(typing.NamedTuple):
@@ -246,16 +246,17 @@ def write_zarr(ds):
     prefix = "obs"
     filename = f"{prefix}-{randint(0, 0xFFFFFFFF):08x}.zarr"
     store = f"{workspace}/{filename}"
-    log("writing to zarr", datetime.now())
-    ds.to_zarr(store, mode="w", consolidated=True, storage_options={"anon": False})
+    log("writing to zarr", store, datetime.now())
+    ds.to_zarr(store, mode="w")
     log("done writing to zarr", datetime.now())
     return store
 
 
 def execute_task(region_code, meta: TaskMetaData):
     ncpus = multiprocessing.cpu_count()
-    num_workers = int(ncpus / threads_per_chunk)
-    dask_client = setup_dask_with_rio(num_workers, threads_per_chunk)
+    num_workers = int(ncpus / threads_per_worker)
+    # element84 server does not seem to like too many threads reading
+    dask_client = setup_dask_with_rio(num_workers, 1)
 
     bbox = bounds(extract_feature(region_code))
     log("searching", bbox.bbox, region_code, datetime.now())
@@ -265,18 +266,17 @@ def execute_task(region_code, meta: TaskMetaData):
     # log('writing input', datetime.now())
     # write_input_data(ds)
 
-    # ds = xarray.open_zarr(
-    #     write_zarr(ds),
-    #     chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
-    #     consolidated=True,
-    # )
+    ds = xarray.open_zarr(
+        write_zarr(ds),
+        chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
+    ).set_coords(["spatial_ref"])
 
     log("geomedian", datetime.now())
     gm = geomedian_with_mads(
         ds,
         reshape_strategy="yxbt",
         work_chunks=(chunks["y"], chunks["x"]),
-        num_threads=threads_per_chunk,
+        num_threads=threads_per_worker,
     )
     log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
     computed = gm.load()
