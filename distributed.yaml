@@ -16,7 +16,8 @@ distributed:
       tcp: 180s
   scheduler:
     work-stealing: False
-    allowed-failures: 5
+    allowed-failures: 3
+    worker-ttl: null
   admin:
     large-graph-warning-threshold: 100MB
   client:

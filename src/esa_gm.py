@@ -28,16 +28,13 @@ measurements_10m = ["blue", "green", "red", "nir"]
 measurements_20m = ["swir22", "rededge2", "rededge3", "rededge1", "swir16", "nir08"]
 mad_bands = ["smad", "emad", "bcmad", "count"]
 masking_band = "scl"
-resolution = 20
-measurements = measurements_20m
+resolution = 10
+measurements = measurements_10m
 
 product = f"2026-Jan-Aug-s2-{resolution}m-MAD"
 s3_bucket = "dea-dme-dev"
 s3_prefix = f"products/solomons/imam/geomad/{product}"
 workspace = f"/dask-workspace"
-
-chunks = {"x": 1000, "y": 1000}
-threads_per_worker = 4
 
 
 class TaskMetaData(typing.NamedTuple):
@@ -107,7 +104,7 @@ def search(bbox, meta: TaskMetaData):
     ).item_collection()
 
 
-def load_mask(items, bbox):
+def load_mask(items, bbox, chunks):
     mask_ds = stac_load(
         items=items,
         bands=[masking_band],
@@ -122,7 +119,7 @@ def load_mask(items, bbox):
     return mask_ds[masking_band]
 
 
-def load_optical(items, bbox):
+def load_optical(items, bbox, chunks):
     optical_ds = stac_load(
         items=items,
         bands=measurements,
@@ -156,11 +153,11 @@ def mask_invalid(optical, mask):
     return optical
 
 
-def load(items, bbox):
+def load(items, bbox, chunks):
     log("loading mask", datetime.now())
-    mask_da = load_mask(items, bbox).persist()
+    mask_da = load_mask(items, bbox, chunks).persist()
     log("loading bands", datetime.now())
-    optical_ds = load_optical(items, bbox)
+    optical_ds = load_optical(items, bbox, chunks)
 
     log("masking", datetime.now())
     for band in measurements:
@@ -254,37 +251,38 @@ def write_zarr(ds):
 
 def execute_task(region_code, meta: TaskMetaData):
     ncpus = multiprocessing.cpu_count()
-    num_workers = int(ncpus / threads_per_worker)
-    # element84 server does not seem to like too many threads reading
-    dask_client = setup_dask_with_rio(num_workers, 1)
 
     bbox = bounds(extract_feature(region_code))
     log("searching", bbox.bbox, region_code, datetime.now())
     items = search(bbox, meta)
-    log("loading", datetime.now())
-    ds = load(items, bbox)
-    # log('writing input', datetime.now())
-    # write_input_data(ds)
 
-    ds = xarray.open_zarr(
-        write_zarr(ds),
-        chunks={"time": 1, "x": chunks["x"], "y": chunks["y"]},
-    ).set_coords(["spatial_ref"])
+    threads_per_worker = 4
+    num_workers = int(ncpus / threads_per_worker)
 
-    log("geomedian", datetime.now())
-    gm = geomedian_with_mads(
-        ds,
-        reshape_strategy="yxbt",
-        work_chunks=(chunks["y"], chunks["x"]),
-        num_threads=threads_per_worker,
-    )
-    log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
-    computed = gm.load()
+    # element84 server does not seem to like too many threads reading
+    chunks = {"x": 1200, "y": 1200}
+    with setup_dask_with_rio(num_workers, 1) as dask_client:
+        log("loading", datetime.now())
+        ds = load(items, bbox, chunks)
+        store = write_zarr(ds)
+
+    chunks = {"x": 400, "y": 400}
+    with setup_dask_with_rio(num_workers, 1) as dask_client:
+        ds = xarray.open_zarr(store, chunks={"time": -1, **chunks}).set_coords(["spatial_ref"])
+        log("geomedian", datetime.now())
+        gm = geomedian_with_mads(
+            ds.chunk({"time": 1, **chunks}),
+            reshape_strategy="yxbt",
+            work_chunks=(chunks["y"], chunks["x"]),
+            num_threads=threads_per_worker,
+        )
+        log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
+        computed = gm.load()
+
     log("writing", datetime.now())
     write_geomedian(assign_crs(computed, crs=output_crs), region_code)
 
     log("done", datetime.now())
-    dask_client.shutdown()
 
 
 def main():
