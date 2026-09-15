@@ -16,7 +16,7 @@ from pystac import ItemCollection
 import numpy
 import xarray
 
-from odc.algo import xr_geomedian, geomedian_with_mads
+from odc.algo import geomedian_with_mads, reshape_for_geomedian
 from odc.geo import BoundingBox
 from odc.geo.xr import write_cog, assign_crs
 from odc.stac import configure_rio, stac_load
@@ -155,17 +155,17 @@ def mask_invalid(optical, mask):
 
 def load(items, bbox, chunks):
     log("loading mask", datetime.now())
-    mask_da = load_mask(items, bbox, chunks).persist()
+    mask_da = load_mask(items, bbox, chunks)
     log("loading bands", datetime.now())
     optical_ds = load_optical(items, bbox, chunks)
 
     log("masking", datetime.now())
-    for band in measurements:
-        optical_ds[band] = xarray.map_blocks(
+    optical_ds = reshape_for_geomedian(optical_ds, axis="time").chunk({"band": -1})
+    optical_ds = xarray.map_blocks(
             mask_invalid,
-            optical_ds[band],
+            optical_ds,
             (mask_da,),
-            template=optical_ds[band],
+            template=optical_ds,
         )
 
     return optical_ds
@@ -245,7 +245,7 @@ def write_zarr(ds):
     store = f"{workspace}/{filename}"
     log("writing to zarr", store, datetime.now())
     ds.to_zarr(store, mode="w")
-    log("done writing to zarr", datetime.now())
+    log("done writing to zarr", store, datetime.now())
     return store
 
 
@@ -260,20 +260,18 @@ def execute_task(region_code, meta: TaskMetaData):
     num_workers = int(ncpus / threads_per_worker)
 
     # element84 server does not seem to like too many threads reading
-    chunks = {"x": 1200, "y": 1200}
+    chunks = {'time': -1, "x": 1200, "y": 1200}
     with setup_dask_with_rio(num_workers, 1) as dask_client:
         log("loading", datetime.now())
-        ds = load(items, bbox, chunks)
-        store = write_zarr(ds)
+        da = load(items, bbox, chunks)
+        store = write_zarr(da.to_dataset(name="yxbt"))
 
-    chunks = {"x": 400, "y": 400}
+    chunks = {'time': -1, "x": 400, "y": 400}
     with setup_dask_with_rio(num_workers, 1) as dask_client:
-        ds = xarray.open_zarr(store, chunks={"time": -1, **chunks}).set_coords(["spatial_ref"])
+        da = xarray.open_zarr(store).set_coords(["spatial_ref"])['yxbt']
         log("geomedian", datetime.now())
         gm = geomedian_with_mads(
-            ds.chunk({"time": 1, **chunks}),
-            reshape_strategy="yxbt",
-            work_chunks=(chunks["y"], chunks["x"]),
+            da,
             num_threads=threads_per_worker,
         )
         log("compute with", ncpus, "cpus", num_workers, "workers", datetime.now())
