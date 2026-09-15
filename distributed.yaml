@@ -15,9 +15,8 @@ distributed:
       connect: 300s
       tcp: 180s
   scheduler:
-    work-stealing: False
     allowed-failures: 3
-    worker-ttl: null
+    worker-ttl: 30 minutes
   admin:
     large-graph-warning-threshold: 100MB
   client:
